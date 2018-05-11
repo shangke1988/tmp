@@ -1,0 +1,570 @@
+import os,re
+import pulp
+
+expensive=False
+productivity_module=True
+
+zh=r'Z:\SteamLibrary\steamapps\common\Factorio\data\base\locale\zh-CN\base.cfg'
+recipe_dir=r'Z:\SteamLibrary\steamapps\common\Factorio\data\base\prototypes\recipe'
+modulel_file=r'Z:\SteamLibrary\steamapps\common\Factorio\data\base\prototypes\item\module.lua'
+
+with open(modulel_file,'r',encoding='utf-8') as f:
+    t=f.read()
+    m=re.search(r'productivitymodulelimitation[^{]+{([^}]+)}',t)
+    if m:
+        t=m.group(1)
+        t=t.split(',')
+        pmlimit=[i.strip('\r\n\t"\' ') for i in t]
+    else:
+        raise(Exception('can\'t find productivitymodulelimitation in '+modulel_file))
+
+ 
+#zh=r'base.cfg'
+#recipe_dir=r'recipe'
+
+#print('cwd:',os.getcwd())
+
+with open(zh,'r',encoding='utf-8') as f:
+    lns=f.readlines()
+
+items={}
+isitem=False
+namelst=['item-name','fluid-name','entity-name','equipment-name','recipe-name']
+for l in lns:
+    l=l.strip()
+    if l=='':
+        continue
+    if l[0]=='[':
+        t=l.strip('[]\t\r\n ')
+        if t in namelst:
+            #print('[item-name]')
+            isitem=True
+        else:
+            isitem=False
+    elif isitem:
+        k=l.find('=')
+        if k<0:
+            print('[ERR]no = in: '+l)
+            continue
+        n=l[:k]
+        n=n.strip()
+        t=l[k+1:]
+        t=t.strip()
+        if len(n)==0 or len(t)==0:
+            print('[ERR]name or text is none: '+l)
+        else:
+            items[n]=t
+
+reitem={}
+for k,v in items.items():
+    if reitem.get(v)==None:
+        reitem[v]=k
+    else:
+        #print('[ERR]items have same name:',(v,reitem.get(v),k))
+        pass
+
+recipe_files=[]
+for i in os.listdir(recipe_dir):
+    fname = os.path.join(recipe_dir,i)
+    if os.path.isfile(fname) and i[-4:]=='.lua':
+        recipe_files.append(fname)
+
+false=False
+true=True
+def lua2dict(l,p=0):
+    #print(repr(l[p:p+20]))
+    cnt=0
+    d={}
+    buf=None
+    key=None
+    while p<len(l):
+               
+        while p<len(l) and l[p] in ' \r\n\t':
+            p+=1
+            
+        if l[p:p+2]=='--':
+            while p<len(l) and l[p] not in '\r\n':
+                p+=1
+            while p<len(l) and l[p] in '\r\n':
+                p+=1
+            continue
+        
+        if l[p]=='{':
+            (buf,p)=lua2dict(l,p+1)
+        elif l[p]=='"':
+            tp=p+1
+            while tp<len(l) and l[tp]!='"':
+                tp+=1
+            tp+=1
+            buf=l[p:tp]
+            p=tp
+        else:
+            tp=p
+            while tp<len(l) and l[tp] not in ' =,}\r\n\t':
+                tp+=1
+            buf=l[p:tp]
+            p=tp
+            
+        #print(repr(l[p:p+20]))
+        #print('buf:',repr(buf))
+        while p<len(l) and l[p] in ' \r\n\t':
+            p+=1
+        if l[p]=='=':
+            key=buf
+        elif l[p] in ',}':
+            if buf!='':
+                if isinstance(buf,str):
+                    try:
+                        val=eval(buf)
+                    except Exception as e:
+                        print('buf',repr(buf))
+                        print(repr(l[p-20:p+20]))
+                        raise(e)
+                else:
+                    val=buf
+                if key==None:
+                    cnt+=1
+                    key=cnt
+                d[key]=val
+                key=None
+            if l[p]=='}':
+                return (d,p+1)
+        else:
+            raise(Exception('to more value:'+repr(l[p:p+20])))
+        p+=1
+        buf=None
+    if buf!=None:
+        val=buf
+        if key==None:
+            cnt+=1
+            key=cnt
+        d[key]=val
+    print('[WARN]finished without }')
+    return (d,p)
+    
+
+recipes={}
+for fn in recipe_files:
+    with open(fn,'r',encoding='utf-8') as f:
+        content=f.read().strip()
+        if content[:14]=='data:extend(\n{':
+            (d,p)=lua2dict(content[14:])
+            #recipes.update(d)
+            for v in d.values():
+                if v['type']!='recipe':
+                    print('[WARN]not recipe:',v)
+                r=v.get('name')
+                if r==None:
+                    print(v)
+                    continue
+                if isinstance(r,str):
+                    if recipes.get(r)!=None:
+                        print('[ERR]two result are same item: '+r)
+                    recipes[r]=v
+        else:
+            print('[ERR]unknown begain in '+fn+':'+content[:14])
+
+module_max={'smelting':2,'chemistry':3,'oil-processing':3}         
+def getrinfo(r,include_category={}):
+    if r==None:
+        return None
+    result_count=r.get('result_count')
+    energy_required=r.get('energy_required')
+    category=r.get('category')
+    name=r.get('name')
+    conf = {}
+    conf['category']=category
+    conf['name']=name
+    modmax=module_max.get(category,4)
+    conf['modmax']=modmax
+    if name not in pmlimit or not productivity_module:
+        conf['pmodmax']=0
+    else:
+        conf['pmodmax']=modmax
+    
+    if include_category.get(category,True): 
+        ingredients=r.get('ingredients')
+        results=r.get('results')
+        if isinstance(results,dict):
+            for rr in results.values():
+                if rr.get(1)==i or rr.get('name')==i:
+                    result_count=rr.get('amount',rr.get(2))
+        if ingredients==None:
+            if expensive:
+                adv=r.get('expensive')
+            else:
+                adv=r.get('normal')
+            if adv:
+                ingredients=adv.get('ingredients')
+                result_count=adv.get('result_count',result_count)
+                energy_required=adv.get('energy_required',energy_required)
+                results=r.get('results')
+                if isinstance(results,dict):
+                    for rr in results.values():
+                        if rr.get(1)==i or rr.get('name')==i:
+                            result_count=rr.get('amount',rr.get(2))
+        if ingredients:
+            #raw=False
+            if result_count==None:
+                result_count=1
+            if energy_required==None:
+                energy_required=0.5
+            d={}
+            i2cnt=0
+            for s in ingredients.values():
+                i2=s.get(1)
+                if not i2:
+                    i2=s.get('name')
+                n2=s.get(2)
+                if not n2:
+                    n2=s.get('amount')
+                if not i2 and not n2:
+                    raise(Exception('[ERR]err in recipe of '+ i +': '+repr(s)))  
+                d[i2]=n2/result_count
+                i2cnt+=n2
+            rate=i2cnt/result_count
+            energy=energy_required/result_count
+            return (d,rate,energy,conf)
+    return None                    
+while True:
+#if True:
+    required={}
+    while True:
+        name = input('item:').strip()
+        if name=='':
+            break
+
+        if name not in items:
+            if name in reitem:
+                name = reitem[name]
+            else:
+                s=[]
+                for k in reitem:
+                    if name in k:
+                        s.append(k)
+                if s:
+                    print('[%d]%s'%(0,'None'))
+                    for i in range(len(s)):
+                        print('[%d]%s'%(i+1,s[i]))
+                    k=-1
+                    while k<0 or k>len(s):
+                        k=input('>')
+                        try:
+                            k=int(k)
+                        except:
+                            k=-1
+                    if k>0:
+                        name=reitem[s[k-1]]
+                    else:
+                        name=None
+                else:
+                    print('Can\'t find item: '+name)
+                    name=None
+        if name:
+            amount=0
+            while amount<=0:
+                amount = input('amount:')
+                try:
+                    amount = float(amount)
+                except:
+                    amount=0
+            required[name]=amount
+
+                
+    if required:
+        source={}
+        #build={name:1}
+        build=required.copy()
+        source1=required.copy()
+        #source1={name:1}
+        #order=[name]
+        info={}
+        energy_required_total=0
+        
+        while source1:
+            #print(source1)
+            source2={}
+            for i,n in source1.items():
+                if i not in info:
+                    info[i]=getrinfo(recipes.get(i),{'smelting':False})
+                if not info[i]:
+                    source[i]=source.get(i,0)+n
+                else:
+                    (d,rate,energy,conf)=info[i]
+                    prate=1+0.1*conf['pmodmax']
+                    n/=prate
+                    for i2,n2 in d.items():
+                        source2[i2]=n2*n+source2.get(i2,0)
+                        build[i2]=n2*n+build.get(i2,0)
+                        #if i2 in order:
+                        #    order.remove(i2)
+                        #order.append(i2)
+                    energy_required_total+=n*energy
+            source1=source2
+            #print(source2)
+            #print(build)
+            #print(source)
+            #print()
+        #print(source)
+        first=True
+        for k,v in required.items():
+            if first:
+                first=False
+            else:
+                print('+',end='')
+            print('%g*%s'%(v,items[k]),end='')    
+        print(' <= %ds'%energy_required_total,end='')
+        for k,v in source.items():
+            print('+%g*%s'%(v,items[k]),end='')
+        print()
+        def zhrjust(s,n):
+            m=len(s)
+            for c in s:
+                if ord(c)>=256:
+                    m+=1
+            return ' '*max(0,n-m)+s
+
+        #for k,v in build.items():
+        #    print('%s: %g'%(zhrjust(items[k],12),v))
+        #for k in order:
+        #    v=build.get(k)
+        #    if v:
+        #        print('%s: %g'%(zhrjust(items[k],12),v))
+        
+        belt=source.copy()
+        info2={}
+        for i in info:
+            if info[i]:
+                info2[i]=info[i]
+        while info2:
+            hrate=None
+            hi=None
+            for i,(d,rate,energy,conf) in info2.items():
+                for dd in d:
+                    if dd not in belt:
+                        rate=0
+                        break
+                if rate==0:
+                    continue
+                rate=(rate-1)*build[i]
+                if hrate==None or rate>hrate:
+                    hrate=rate
+                    hi=i
+            del info2[hi]
+            n=build[hi]
+            #print(repr(hi),repr(info.keys()))
+            (d,rate,energy,conf)=info[hi]
+            belt[hi]=n
+            pn=conf['pmodmax']
+            prate=1+0.1*pn
+            nn=n/prate
+            for i2,n2 in d.items():
+                belt[i2]-=nn*n2
+                if belt[i2]==0:
+                    del belt[i2]
+            pstr='     '
+            if pn>0:
+                pstr='[Px%d]'%pn
+            print('%s: %6.2g | %6.2fs | '%(zhrjust(items[hi]+pstr,18),n,energy*nn),end='')
+            first=True
+            for i2,n2 in d.items():
+                if first:
+                    first=False
+                else:
+                    print('+',end='')
+                print('%.2f*%s'%(n2*nn,items[i2]),end='')
+            print()
+
+            '''
+            first=True
+            for k,v in belt.items():
+                if first:
+                    first=False
+                else:
+                    print('+',end='')
+                print('%g*%s'%(v,items[k]),end='')
+            print()
+            '''
+        #oil
+        oil_source_name=['heavy-oil','light-oil','petroleum-gas','solid-fuel']
+        oil_source={}
+        for i in oil_source_name:
+            if source.get(i):
+                oil_source[i]=source.get(i)
+        if oil_source:
+            print('[oil-processing]')
+            #print( 'heavy-oil:%g,light-oil:%g,petroleum-gas:%g,solid-fuel:%g' % \
+            #    (source.get('heavy-oil',0),source.get('light-oil',0),source.get('petroleum-gas',0),source.get('solid-fuel',0)))
+
+            
+            oil_recipe=['basic-oil-processing','advanced-oil-processing',\
+                        'heavy-oil-cracking','light-oil-cracking',\
+                        'solid-fuel-from-light-oil','solid-fuel-from-petroleum-gas',\
+                        'solid-fuel-from-heavy-oil']
+            items['solid-fuel-from-light-oil']='固体燃料合成(轻油)'
+            items['solid-fuel-from-petroleum-gas']='固体燃料合成(石油气)'
+            items['solid-fuel-from-heavy-oil']='固体燃料合成(重油)'
+
+     
+            model = pulp.LpProblem("Minimising oil", pulp.LpMaximize)
+            vars=[]
+            oil_info=[]
+
+            if productivity_module:
+                oil_prate=1.3
+            else:
+                oil_prate=1
+                    
+            for i in range(len(oil_recipe)):
+                rn=oil_recipe[i]
+                vars.append(pulp.LpVariable(rn,lowBound =0))
+                
+                r=recipes[rn]
+                energy_required=r.get('energy_required')
+                category=r.get('category')
+                if expensive:
+                    adv=r.get('expensive')
+                else:
+                    adv=r.get('normal')
+                if adv==None: 
+                    adv=r
+                
+                d={}
+                results=adv.get('results')
+                if isinstance(results,dict):
+                    for rr in results.values():
+                        i1=rr.get(1,rr.get('name'))
+                        n1=rr.get(2,rr.get('amount'))
+                        if not i1 and not n1:
+                            raise(Exception('[ERR]err results in recipe of '+ i +': '+repr(s)))  
+                        d[i1]=n1*oil_prate
+                                
+                ingredients=adv.get('ingredients')
+                if ingredients:
+                    for s in ingredients.values():
+                        i2=s.get(1,s.get('name'))
+                        n2=s.get(2,s.get('amount'))
+                        if not i2 and not n2:
+                            raise(Exception('[ERR]err ingredients in recipe of '+ i +': '+repr(s)))  
+                        d[i2]=-n2
+                oil_info.append((d,energy_required))    
+            
+            oil_amount=0
+            for r in range(len(oil_recipe)):
+                (d,energy_required)=oil_info[r]
+                oil_amount+=d.get('crude-oil',0)*vars[r]
+            model+=oil_amount
+            for i in oil_source_name:
+                amount=0
+                for r in range(len(oil_recipe)):
+                    (d,energy_required)=oil_info[r]
+                    amount+=d.get(i,0)*vars[r]
+                #print(amount)
+                model+=amount>=oil_source.get(i,0)
+            
+            #pulp.GLPK().solve(model)
+            #model.solve()
+            pulp.GLPK(msg=False).solve(model)
+            
+            #print('crude-oil:',-pulp.value(model.objective))
+            pstr='     '
+            if productivity_module:
+                pstr='[Px%d]'%3
+            oil_energy=0
+            for r in range(len(oil_recipe)):
+                n=vars[r].varValue
+                if n==0:
+                    continue
+                (d,energy_required)=oil_info[r]
+                print('%s: %7.2fs | '%(zhrjust(items[oil_recipe[r]]+pstr,18),n*energy_required),end='')
+                oil_energy+=n*energy_required
+                first=True
+                for i2,n2 in d.items():
+                    if first:
+                        first=False
+                    elif n2>0:
+                        print('+',end='')      
+                    print('%.2f*%s'%(n2*n,items[i2]),end='')
+                    oil_source[i2]=oil_source.get(i2,0)-n2*n
+                print()
+
+            first=True
+            for i2,n2 in oil_source.items():
+                if n2>=-0.01:
+                    continue
+                if first:
+                    first=False
+                    print('盈余：',end='')
+                else:
+                    print('+',end='')
+                print('%g*%s'%(-n2,items[i2]),end='')
+            if not first:
+                print()
+                
+            print('原料：',end='')
+            first=True
+            for i2,n2 in oil_source.items():
+                if n2<=0.001:
+                    continue
+                if first:
+                    first=False
+                else:
+                    print('+',end='')
+                print('%.2f*%s'%(n2,items[i2]),end='')
+            print()
+        #smelting
+        smelting_source_name=['iron-plate','iron-plate-steel','steel-plate','copper-plate','stone-brick']
+        smelting_source={}
+        for i in smelting_source_name:
+            if source.get(i):
+                smelting_source[i]=source.get(i)
+        if smelting_source:
+            print('[smelting]')
+            for i,n in smelting_source.items():
+                if not info.get(i):
+                    info[i]=getrinfo(recipes.get(i))
+            if productivity_module:
+                prate=1.2
+            else:
+                prate=1
+            if smelting_source.get('steel-plate'):
+                (d,rate,energy,conf)=info['steel-plate']
+                #smelting_source['iron-plate']= smelting_source.get('iron-plate',0)+d['iron-plate']*smelting_source.get('steel-plate')/prate
+                smelting_source['iron-plate-steel']= d['iron-plate']*smelting_source.get('steel-plate')/prate
+            info['iron-plate-steel']=info['iron-plate']
+            items['iron-plate-steel']='铁板(钢)'
+            smelting_ore={}
+            for i in ['iron-plate','iron-plate-steel','copper-plate','stone-brick']:
+                if i not in smelting_source:
+                    continue
+                n=smelting_source[i]/prate
+                (d,rate,energy,conf)=info[i]
+                for i2,n2 in d.items():
+                    smelting_ore[i2]=smelting_ore.get(i2,0)+n2*n
+            print('    名称     :   数量  | 冶炼时间 |  传送带')
+            pstr='     '
+            if productivity_module:
+                pstr='[Px%d]'%2
+            for i in smelting_source_name:
+                if i not in smelting_source:
+                    continue
+                n=smelting_source[i]
+                (d,rate,energy,conf)=info[i]
+                print('%s: %7.2f | %7.2fs | %7.2f'%(zhrjust(items[i]+pstr,13),n,n*energy/prate,n/26.78))
+            print('矿石：',end='')
+            first=True
+            for i2,n2 in smelting_ore.items():
+                if first:
+                    first=False
+                else:
+                    print('+',end='')
+                print('%.2f*%s'%(n2,items[i2]),end='')
+            print()
+        #Graphviz
+            
+    
+        
+        
+        
+        
+    
